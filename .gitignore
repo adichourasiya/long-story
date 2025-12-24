@@ -8,6 +8,12 @@ __pycache__/
 .env.local
 .env.*.local
 
+# AI Assistant artifacts
+.gemini/
+
+# UV package manager
+uv.lock
+
 # Debug and test outputs
 debug/
 reports/
@@ -121,7 +127,6 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
 .venv
 env/
 venv/

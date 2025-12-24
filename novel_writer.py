@@ -6,7 +6,6 @@ Novel Writer CLI - Simplified interface for generating novels
 import os
 import asyncio
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
