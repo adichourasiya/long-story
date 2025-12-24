@@ -43,7 +43,7 @@ def main():
             text="",
             values=[
                 ("generate", "Generate a new novel"),
-                ("list", "List existing stories"),
+                ("edit", "Edit/Rewrite existing chapter"),
                 ("translate", "Translate a story"),
                 ("exit", "Exit"),
             ],
@@ -58,6 +58,33 @@ def main():
             if not concept:
                 message_dialog(title="Cancelled", text="No concept entered. Returning to menu.").run()
                 continue
+
+            # Prompt for number of chapters
+            chapters_str = input_dialog(
+                title="Chapter Count", 
+                text="How many chapters? (Default: 12)",
+                default="12"
+            ).run()
+            
+            try:
+                num_chapters = int(chapters_str) if chapters_str else 12
+            except ValueError:
+                num_chapters = 12
+
+            # Prompt for chapter size
+            size_choice = radiolist_dialog(
+                title="Chapter Size",
+                text="Select target length per chapter:",
+                values=[
+                    ("small", "Small (800-1000 words)"),
+                    ("medium", "Medium (1500-2000 words)"),
+                    ("large", "Large (2500-3500 words)"),
+                    ("super_large", "Super Large (4000-5000 words)")
+                ],
+                default="medium"
+            ).run()
+            
+            chapter_size = size_choice if size_choice else "medium"
 
             # Create story metadata automatically
             story_id = slugify(concept)
@@ -91,12 +118,12 @@ def main():
             try:
                 # Safe defaults: 12 chapters, no translation
                 import asyncio
-                asyncio.run(writer.generate_complete_novel(story_id, concept, num_chapters=12, translate_to=None))
+                asyncio.run(writer.generate_complete_novel(story_id, concept, num_chapters=num_chapters, translate_to=None, chapter_size=chapter_size))
                 message_dialog(title="Done", text="Novel generation finished and saved.").run()
             except Exception as e:
                 message_dialog(title="Error", text=f"Generation failed. Try again later. ({e})").run()
 
-        elif choice == "list":
+        elif choice == "edit":
             writer = NovelWriter()
             stories = writer.list_stories()
             values = [ (s['id'], f"{s['metadata'].get('title','Untitled')} ({len(s['metadata'].get('chapters',[]))} chapters)") for s in stories ]
@@ -104,12 +131,40 @@ def main():
                 message_dialog(title="No stories", text="No stories found. Generate one first.").run()
                 continue
 
-            selected = radiolist_dialog(title="Your Stories", values=values).run()
-            if selected:
-                # Show a simple view-only summary
-                meta = next(s['metadata'] for s in stories if s['id'] == selected)
-                text = f"{meta.get('title')}\nChapters: {len(meta.get('chapters', []))}\nWords: {meta.get('word_count', 0)}"
-                message_dialog(title="Story", text=text).run()
+            selected_id = radiolist_dialog(title="Select a story to edit", values=values).run()
+            if not selected_id:
+                continue
+
+            # Load chapters for selection
+            meta = next(s['metadata'] for s in stories if s['id'] == selected_id)
+            chapters_list = meta.get('chapters', [])
+            if not chapters_list:
+                message_dialog(title="No chapters", text="No chapters found to edit.").run()
+                continue
+                
+            ch_values = [(ch['id'], f"{i+1}. {ch['title']}") for i, ch in enumerate(chapters_list)]
+            selected_chapter = radiolist_dialog(title="Select Chapter to Rewrite", values=ch_values).run()
+            
+            if not selected_chapter:
+                continue
+                
+            # Get Rewrite Instructions
+            instruction = input_dialog(
+                title="Rewrite Instructions", 
+                text=f"How should we change this chapter?\n(e.g., 'Make dialogue snappier', 'Change the ending to...')",
+            ).run()
+            
+            if not instruction:
+                continue
+
+            console.print(f"[bold green]Rewriting chapter '{selected_chapter}'...[/bold green]")
+            
+            try:
+                import asyncio
+                asyncio.run(writer.rewrite_chapter(selected_id, selected_chapter, instruction))
+                message_dialog(title="Success", text="Chapter rewritten successfully.").run()
+            except Exception as e:
+                message_dialog(title="Error", text=f"Failed to rewrite chapter: {e}").run()
 
         elif choice == "translate":
             writer = NovelWriter()

@@ -14,6 +14,7 @@ import click
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.markdown import Markdown
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from dotenv import load_dotenv
 import re
@@ -22,6 +23,13 @@ import re
 load_dotenv()
 
 console = Console()
+
+CHAPTER_SIZES = {
+    'small': {'words': '800-1000', 'max_tokens': 1500},
+    'medium': {'words': '1500-2000', 'max_tokens': 3000},
+    'large': {'words': '2500-3500', 'max_tokens': 5000},
+    'super_large': {'words': '4000-5000', 'max_tokens': 7000}
+}
 
 class NovelWriter:
     """Simple novel writing interface"""
@@ -56,7 +64,7 @@ class NovelWriter:
     
     # `create_story` removed — story creation is no longer available via CLI
     
-    async def generate_chapter(self, story_id: str, chapter_title: str, chapter_prompt: str = None, translate_to: str = None) -> str:
+    async def generate_chapter(self, story_id: str, chapter_title: str, chapter_prompt: str = None, translate_to: str = None, target_word_count: str = "1500-2000") -> str:
         """Generate a chapter for the story using the full architecture"""
         
         story_path = self.stories_path / story_id
@@ -122,7 +130,7 @@ class NovelWriter:
                 session_id = await memory_manager.start_chapter_generation(
                     chapter_id=chapter_id,
                     chapter_title=chapter_title,
-                    expected_length=2000
+                    expected_length=int(target_word_count.split('-')[1]) if '-' in target_word_count else 2000
                 )
                 
                 progress.update(task, description="Gathering story context...")
@@ -141,14 +149,14 @@ class NovelWriter:
                 
                 # Build generation prompt
                 generation_prompt = self._build_chapter_prompt(
-                    story_metadata, chapter_title, chapter_num, chapter_prompt, context
+                    story_metadata, chapter_title, chapter_num, chapter_prompt, context, target_word_count
                 )
                 
                 # Generate the chapter
                 response = await model_manager.generate_text(
                     prompt=generation_prompt,
                     capability=ModelCapability.TEXT_GENERATION,
-                    max_tokens=3000,
+                    max_tokens=int(target_word_count.split('-')[1]) * 2 if '-' in target_word_count else 4000,
                     temperature=0.8,
                     context={"chapter_id": chapter_id, "story_id": story_id}
                 )
@@ -227,10 +235,16 @@ class NovelWriter:
 {chr(10).join(yaml_fields)}
 ---
 
-# Chapter {chapter_num}: {chapter_title}
-
-{generated_content}
 """
+                
+                # Intelligent header generation to avoid duplication
+                if not generated_content.strip().startswith("#"):
+                    if chapter_title.lower().startswith("chapter"):
+                        chapter_content += f"# {chapter_title}\n\n"
+                    else:
+                        chapter_content += f"# Chapter {chapter_num}: {chapter_title}\n\n"
+                
+                chapter_content += f"{generated_content}\n"""
                 
                 with open(chapter_path, 'w', encoding='utf-8') as f:
                     f.write(chapter_content)
@@ -269,8 +283,11 @@ class NovelWriter:
         except Exception as e:
             console.print(f"[red]✗ Error generating chapter: {str(e)}[/red]")
             raise
+        finally:
+            if 'model_manager' in locals() and model_manager:
+                await model_manager.close()
     
-    async def generate_complete_novel(self, story_id: str, novel_concept: str, num_chapters: int = 12, translate_to: str = None) -> str:
+    async def generate_complete_novel(self, story_id: str, novel_concept: str, num_chapters: int = 12, translate_to: str = None, chapter_size: str = 'medium') -> str:
         """Generate a complete novel autonomously based on a concept"""
         
         story_path = self.stories_path / story_id
@@ -301,7 +318,8 @@ class NovelWriter:
             console.print(f"\n[bold cyan]Generating Chapter {i}: {chapter_title}[/bold cyan]")
             
             try:
-                chapter_path = await self.generate_chapter(story_id, chapter_title, chapter_prompt, translate_to)
+                size_config = CHAPTER_SIZES.get(chapter_size, CHAPTER_SIZES['medium'])
+                chapter_path = await self.generate_chapter(story_id, chapter_title, chapter_prompt, translate_to, size_config['words'])
                 console.print(f"[green]✓ Chapter {i} completed[/green]")
             except Exception as e:
                 console.print(f"[red]✗ Error in Chapter {i}: {str(e)}[/red]")
@@ -440,7 +458,163 @@ class NovelWriter:
         except Exception as e:
             console.print(f"[red]✗ Error translating chapter: {str(e)}[/red]")
             raise
+        finally:
+            if 'model_manager' in locals() and model_manager:
+                await model_manager.close()
         
+    async def read_chapter(self, story_id: str, chapter_id: str) -> Optional[str]:
+        """Read a specific chapter content"""
+        story_path = self.stories_path / story_id
+        if not story_path.exists():
+            raise ValueError(f"Story '{story_id}' not found")
+
+        # Load metadata to find filename
+        metadata_path = story_path / "metadata.json"
+        with open(metadata_path, 'r') as f:
+            story_metadata = json.load(f)
+
+        chapter_info = next((ch for ch in story_metadata.get('chapters', []) if ch['id'] == chapter_id), None)
+        if not chapter_info:
+             # Try matching by number if simple integer passed
+             try:
+                 idx = int(chapter_id) - 1
+                 if 0 <= idx < len(story_metadata.get('chapters', [])):
+                     chapter_info = story_metadata['chapters'][idx]
+             except ValueError:
+                 pass
+        
+        if not chapter_info:
+            raise ValueError(f"Chapter '{chapter_id}' not found")
+
+        chapter_path = story_path / "chapters" / chapter_info['filename']
+        if not chapter_path.exists():
+             return None
+        
+        with open(chapter_path, 'r', encoding='utf-8') as f:
+            return f.read()
+
+    async def add_chapter(self, story_id: str, chapter_title: str, chapter_prompt: str = None, target_word_count: str = "1500-2000") -> str:
+        """Add a new chapter to an existing story"""
+        # This reuses the logic from generate_chapter which appends to the story
+        # generate_chapter handles metadata updates and file creation
+        return await self.generate_chapter(story_id, chapter_title, chapter_prompt, target_word_count=target_word_count)
+
+    async def rewrite_chapter(self, story_id: str, chapter_id: str, instruction: str) -> str:
+        """Rewrite an existing chapter based on instructions"""
+        story_path = self.stories_path / story_id
+        if not story_path.exists():
+            raise ValueError(f"Story '{story_id}' not found")
+            
+        # Load metadata
+        metadata_path = story_path / "metadata.json"
+        with open(metadata_path, 'r') as f:
+            story_metadata = json.load(f)
+            
+        # Find chapter
+        chapter_info = next((ch for ch in story_metadata['chapters'] if ch['id'] == chapter_id), None)
+        if not chapter_info:
+             raise ValueError(f"Chapter '{chapter_id}' not found")
+
+        # Read existing content
+        chapter_path = story_path / "chapters" / chapter_info['filename']
+        with open(chapter_path, 'r', encoding='utf-8') as f:
+            original_content = f.read()
+
+        console.print(f"[bold cyan]Rewriting chapter: {chapter_info['title']}[/bold cyan]")
+
+        try:
+            from novel_memory.models.abstraction_layer import ModelManager, ModelCapability, ModelConfig, ModelProvider, AzureOpenAIModel
+            
+            # Setup Model Manager (simplified setup for edit)
+            model_manager = ModelManager()
+            model_config = ModelConfig(
+                provider=ModelProvider.AZURE_OPENAI,
+                model_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1"),
+                api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+                endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+                max_tokens=8192,
+                temperature=0.7,
+                capabilities=[ModelCapability.TEXT_GENERATION],
+                cost_per_token=0.00003,
+                rate_limit_rpm=60,
+                fallback_model=None
+            )
+            azure_model = AzureOpenAIModel(model_config)
+            model_manager.router.register_model("azure-gpt", azure_model, model_config)
+
+            # Build Rewrite Prompt
+            prompt = f"""You are editing a novel. rewrite the following chapter based on the user's instructions.
+
+STORY: {story_metadata['title']}
+CHAPTER: {chapter_info['title']}
+
+INSTRUCTIONS:
+{instruction}
+
+ORIGINAL CONTENT:
+{original_content}
+
+TASK:
+Rewrite the chapter content. Keep the same plot points unless instructed otherwise. Improve the prose and incorporate the requested changes.
+Output ONLY the new chapter content (markdown). Do not include metadata headers.
+"""
+            
+            with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
+                task = progress.add_task("Rewriting...", total=None)
+                
+                response = await model_manager.generate_text(
+                    prompt=prompt,
+                    capability=ModelCapability.TEXT_GENERATION,
+                    max_tokens=4000
+                )
+                
+                if not response.success:
+                    raise Exception(f"Rewrite failed: {response.error_message}")
+                
+                # Save New Content
+                new_content = response.generated_text
+                
+                # Re-add header if missing
+                title_header = f"# {chapter_info['title']}"
+                if not new_content.strip().startswith("#"):
+                     new_content = f"{title_header}\n\n{new_content}"
+
+                # Preserve Frontmatter? 
+                # Simpler to just rewrite file with new content + basic frontmatter updates
+                word_count = len(new_content.split())
+                
+                yaml_fields = [
+                    f"title: {chapter_info['title']}",
+                    f"chapter: {chapter_info.get('chapter', 0)}",
+                    f"story: {story_metadata['title']}",
+                    f"updated: {datetime.now().isoformat()}",
+                    f"word_count: {word_count}"
+                ]
+                
+                full_file_content = f"---\n{chr(10).join(yaml_fields)}\n---\n\n{new_content}\n"
+                
+                with open(chapter_path, 'w', encoding='utf-8') as f:
+                    f.write(full_file_content)
+                    
+                # Update Metadata
+                chapter_info['word_count'] = word_count
+                chapter_info['last_modified'] = datetime.now().isoformat()
+                story_metadata['word_count'] = sum(ch.get('word_count', 0) for ch in story_metadata['chapters'])
+                story_metadata['last_modified'] = datetime.now().isoformat()
+                
+                with open(metadata_path, 'w') as f:
+                    json.dump(story_metadata, f, indent=2)
+                    
+                console.print(f"[green]✓ Rewrote chapter '{chapter_info['title']}'[/green]")
+                return str(chapter_path)
+
+        except Exception as e:
+            console.print(f"[red]✗ Error rewriting chapter: {str(e)}[/red]")
+            raise
+        finally:
+             if 'model_manager' in locals() and model_manager:
+                await model_manager.close()
+
     def _generate_novel_outline(self, concept: str, num_chapters: int) -> list:
         """Generate chapter outline for the novel"""
         
@@ -512,13 +686,13 @@ class NovelWriter:
         outline = []
         for i in range(num_chapters):
             outline.append({
-                "title": f"Chapter {i+1}: The Journey",
+                "title": f"Chapter {i+1}",
                 "prompt": f"Continue the story based on: {concept}. This is chapter {i+1} of {num_chapters}."
             })
         return outline
 
     def _build_chapter_prompt(self, story_metadata: Dict, chapter_title: str, 
-                             chapter_num: int, user_prompt: str, context: Any) -> str:
+                             chapter_num: int, user_prompt: str, context: Any, target_word_count: str = "1500-2000") -> str:
         """Build the chapter generation prompt"""
         
         prompt = f"""You are writing Chapter {chapter_num} of the novel "{story_metadata['title']}"
@@ -548,7 +722,7 @@ STORY NOTES:
         prompt += f"""
 CRITICAL WORD COUNT CONSTRAINT:
 - Write EXACTLY one complete chapter
-- Target word count: 1500-2000 words (STRICT - do not exceed 2000 words)
+- Target word count: {target_word_count} words (STRICT)
 - Count your words carefully to stay within this limit
 
 INSTRUCTIONS:
@@ -557,7 +731,7 @@ Write a compelling chapter that:
 2. Maintains consistency with previous chapters
 3. Has strong character development and dialogue  
 4. Ends with a natural transition or hook for the next chapter
-5. MOST IMPORTANT: Stay within the 1500-2000 word limit
+5. MOST IMPORTANT: Stay within the {target_word_count} word limit
 
 Begin writing the chapter now:
 """
@@ -667,6 +841,27 @@ def translate_story(story_id: str, target_language: str, chapters: str = None):
             
     except Exception as e:
         console.print(f"[red]✗ Failed to translate story: {str(e)}[/red]")
+
+
+
+@cli.command()
+@click.argument('story_id')
+@click.argument('chapter_id')
+@click.argument('instruction', required=True)
+def edit(story_id: str, chapter_id: str, instruction: str):
+    """Edit/Rewrite an existing chapter.
+    
+    Provide STORY_ID, CHAPTER_ID (e.g. chapter_01) and instructions.
+    """
+    writer = NovelWriter()
+    console.print(Panel.fit(f"[bold blue]Rewriting Story: {story_id}\nChapter: {chapter_id}"))
+    
+    try:
+        chapter_path = asyncio.run(writer.rewrite_chapter(story_id, chapter_id, instruction))
+        console.print(f"[green]✓ Chapter rewritten successfully![/green]")
+        console.print(f"[blue]Saved to: {chapter_path}[/blue]")
+    except Exception as e:
+        console.print(f"[red]✗ Failed to rewrite chapter: {str(e)}[/red]")
 
 if __name__ == "__main__":
     cli()

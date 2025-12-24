@@ -66,19 +66,31 @@ Launch the interactive menu-driven interface:
 .\scripts\launch.ps1
 ```
 
-The interactive CLI provides a simple menu to:
-- Generate new novels
-- List existing stories
-- Translate stories
-- View story details
+-   **Interactive Mode**: Run `./scripts/launch.sh` (or `launch.ps1` on Windows) to start the interactive menu.
+    -   **Generate**: Create a new novel.
+    -   **Edit**: Rewrite existing chapters based on new instructions.
+    -   **Translate**: Translate stories or chapters.
 
 ### 2. Command-Line Interface (Advanced)
 
 Use the command-line interface for more control:
 
+-   **CLI Commands**:
+    -   **Generate**: `uv run python novel_writer.py generate <story_id> <concept> --chapters 5`
+    -   **Edit**: `uv run python novel_writer.py edit <story_id> <chapter_id> <instruction>`
+    -   **Translate**: `uv run python novel_writer.py translate_story <story_id> <lang>`
+
 #### List Stories
 ```bash
 uv run python novel_writer.py list
+```
+
+#### Edit / Rewrite Chapter
+
+Rewrite an existing chapter with new instructions:
+
+```bash
+uv run python novel_writer.py edit <story_id> <chapter_id> "Make the dialogue funnier and add a cliffhanger"
 ```
 
 #### Generate a Complete Novel
