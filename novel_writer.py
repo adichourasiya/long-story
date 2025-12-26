@@ -325,7 +325,42 @@ class NovelWriter:
                 console.print(f"[red]✗ Error in Chapter {i}: {str(e)}[/red]")
                 raise
         
-        console.print(f"\n[bold green]✓ Complete novel generated successfully![/bold green]")
+        console.print(f"\n[bold green]✓ Initial generation complete. Starting automations...[/bold green]")
+        
+        # -----------------------------------------------------
+        # AUTOMATED POST-PROCESSING
+        # -----------------------------------------------------
+        
+        # 1. Auto-Proofread & Rename
+        console.print(f"\n[bold cyan]Phase 2: Auto-Proofreading & Renaming[/bold cyan]")
+        console.print("[dim]Polishing chapters and generating titles...[/dim]")
+        
+        # Reload metadata to get current chapters
+        with open(metadata_path, 'r') as f:
+            current_metadata = json.load(f)
+            
+        proofread_chapters = []
+        for ch in current_metadata.get('chapters', []):
+            try:
+                # proofread_chapter updates metadata on disk
+                await self.proofread_chapter(story_id, ch['id'])
+                proofread_chapters.append(ch['id'])
+            except Exception as e:
+                console.print(f"[red]Failed to proofread {ch['id']}: {e}[/red]")
+                
+        # 2. Auto-Generate Image Prompts
+        console.print(f"\n[bold cyan]Phase 3: Art Direction[/bold cyan]")
+        console.print("[dim]Generating visual prompts for chapters...[/dim]")
+        
+        try:
+            # We pass the list of IDs we essentially just verified exist
+            await self.generate_image_prompts(story_id, proofread_chapters)
+        except Exception as e:
+            console.print(f"[red]Art direction failed: {e}[/red]")
+
+        # -----------------------------------------------------
+        
+        console.print(f"\n[bold green]✓ Complete novel generated, polished, and visualized successfully![/bold green]")
         console.print(f"[blue]Total chapters: {num_chapters}[/blue]")
         if translate_to:
             console.print(f"[magenta]✓ All chapters translated to {translate_to}[/magenta]")
@@ -462,6 +497,157 @@ class NovelWriter:
             if 'model_manager' in locals() and model_manager:
                 await model_manager.close()
         
+    async def proofread_chapter(self, story_id: str, chapter_id: str) -> str:
+        """Proofread an existing chapter, update title and generate image prompt"""
+        
+        story_path = self.stories_path / story_id
+        if not story_path.exists():
+            raise ValueError(f"Story '{story_id}' not found")
+            
+        # Load story metadata
+        metadata_path = story_path / "metadata.json"
+        with open(metadata_path, 'r') as f:
+            story_metadata = json.load(f)
+            
+        # Find the chapter
+        chapter_info = next((ch for ch in story_metadata.get('chapters', []) if ch['id'] == chapter_id), None)
+        if not chapter_info:
+            raise ValueError(f"Chapter '{chapter_id}' not found")
+            
+        # Read the existing chapter file
+        old_filename = chapter_info['filename']
+        chapter_path = story_path / "chapters" / old_filename
+        
+        if not chapter_path.exists():
+            raise ValueError(f"Chapter file not found: {chapter_path}")
+            
+        with open(chapter_path, 'r', encoding='utf-8') as f:
+            original_content = f.read()
+            
+        console.print(f"[cyan]Proofreading chapter: {chapter_info['title']}[/cyan]")
+        
+        try:
+            # Import dependencies
+            from novel_memory.models.abstraction_layer import ModelManager, ModelCapability, ModelConfig, ModelProvider, AzureOpenAIModel
+            from novel_memory.proofreading.proofreader import StoryProofreader, ProofreadingRequest
+            
+            # Initialize systems
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console
+            ) as progress:
+                
+                task = progress.add_task("Initializing proofreader...", total=None)
+                
+                # Setup model manager (reusing config pattern)
+                model_manager = ModelManager()
+                model_config = ModelConfig(
+                    provider=ModelProvider.AZURE_OPENAI,
+                    model_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1"),
+                    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+                    endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+                    max_tokens=8192,
+                    temperature=0.7,
+                    capabilities=[ModelCapability.TEXT_GENERATION],
+                    cost_per_token=0.00003,
+                    rate_limit_rpm=60,
+                    fallback_model=None
+                )
+                azure_model = AzureOpenAIModel(model_config)
+                model_manager.router.register_model("azure-gpt", azure_model, model_config)
+                
+                proofreader = StoryProofreader(model_manager)
+                
+                progress.update(task, description="Proofreading and analyzing...")
+                
+                # Extract main content (strip existing frontmatter if any)
+                content_to_proof = original_content
+                if original_content.startswith('---'):
+                    parts = original_content.split('---', 2)
+                    if len(parts) >= 3:
+                        content_to_proof = parts[2].strip()
+                
+                request = ProofreadingRequest(
+                    content=content_to_proof,
+                    chapter_title=chapter_info['title'],
+                    story_context={"title": story_metadata['title'], "story_id": story_id}
+                )
+                
+                response = await proofreader.proofread_chapter(request)
+                
+                if not response.success:
+                    raise Exception(f"Proofreading failed: {response.error_message}")
+                    
+                progress.update(task, description="Saving changes...")
+                
+                # Process results
+                new_title = response.new_title
+                proofread_text = response.proofread_content
+                image_prompt = response.image_prompt
+                
+                # Determine new filename
+                safe_title = re.sub(r"[^a-z0-9_\-]+", "_", new_title.lower())
+                safe_title = safe_title.strip("_") or "chapter"
+                new_filename = f"{chapter_info['id']}_{safe_title}.md"
+                new_path = story_path / "chapters" / new_filename
+                
+                # Reconstruct file with frontmatter
+                escaped_prompt = image_prompt.replace('"', '\\"')
+                yaml_fields = [
+                    f"title: {new_title}",
+                    f"chapter: {chapter_info.get('chapter', 0)}",
+                    f"story: {story_metadata['title']}",
+                    f"proofread: {datetime.now().isoformat()}",
+                    f"image_prompt: \"{escaped_prompt}\""
+                ]
+                
+                final_content = f"""---
+{chr(10).join(yaml_fields)}
+---
+
+# {new_title}
+
+{proofread_text}
+"""
+                
+                # Delete old file if filename changed
+                if new_filename != old_filename:
+                    try:
+                        os.remove(chapter_path)
+                    except OSError:
+                        pass
+                
+                # Write new file
+                with open(new_path, 'w', encoding='utf-8') as f:
+                    f.write(final_content)
+                
+                # Update Metadata
+                chapter_info['title'] = new_title
+                chapter_info['filename'] = new_filename
+                chapter_info['image_prompt'] = image_prompt
+                chapter_info['last_modified'] = datetime.now().isoformat()
+                chapter_info['word_count'] = len(proofread_text.split())
+                
+                story_metadata['last_modified'] = datetime.now().isoformat()
+                
+                with open(metadata_path, 'w') as f:
+                    json.dump(story_metadata, f, indent=2)
+                    
+            console.print(f"[green]✓ Proofreading complete![/green]")
+            console.print(f"[blue]New Title: {new_title}[/blue]")
+            console.print(f"[blue]Saved to: {new_path}[/blue]")
+            console.print(f"[magenta]Image Prompt generated[/magenta]")
+            
+            return str(new_path)
+
+        except Exception as e:
+            console.print(f"[red]✗ Proofreading error: {str(e)}[/red]")
+            raise
+        finally:
+            if 'model_manager' in locals() and model_manager:
+                await model_manager.close()
+
     async def read_chapter(self, story_id: str, chapter_id: str) -> Optional[str]:
         """Read a specific chapter content"""
         story_path = self.stories_path / story_id

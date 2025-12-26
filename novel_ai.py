@@ -44,6 +44,8 @@ def main():
             values=[
                 ("generate", "Generate a new novel"),
                 ("edit", "Edit/Rewrite existing chapter"),
+                ("proofread", "Proofread & rename chapter"),
+                ("art", "Generate Image Prompts"),
                 ("translate", "Translate a story"),
                 ("exit", "Exit"),
             ],
@@ -166,6 +168,105 @@ def main():
             except Exception as e:
                 message_dialog(title="Error", text=f"Failed to rewrite chapter: {e}").run()
 
+        elif choice == "proofread":
+            writer = NovelWriter()
+            stories = writer.list_stories()
+            values = [ (s['id'], f"{s['metadata'].get('title','Untitled')} ({len(s['metadata'].get('chapters',[]))} chapters)") for s in stories ]
+            
+            if not values:
+                message_dialog(title="No stories", text="No stories available. Generate one first.").run()
+                continue
+
+            selected_id = radiolist_dialog(title="Select a story to proofread", values=values).run()
+            if not selected_id:
+                continue
+                
+            # Scope selection
+            scope = radiolist_dialog(title="Proofreading Scope", values=[('entire','Entire story'), ('single','Single chapter')]).run()
+            if not scope:
+                continue
+
+            chapter_ids = []
+            if scope == 'single':
+                # Get chapters
+                meta = next(s['metadata'] for s in stories if s['id'] == selected_id)
+                chapters_list = meta.get('chapters', [])
+                
+                if not chapters_list:
+                    message_dialog(title="No chapters", text="No chapters found.").run()
+                    continue
+                    
+                ch_values = [(ch['id'], f"{i+1}. {ch['title']}") for i, ch in enumerate(chapters_list)]
+                selected_chapter = radiolist_dialog(title="Select Chapter to Proofread", values=ch_values).run()
+                
+                if not selected_chapter:
+                    continue
+                chapter_ids = [selected_chapter]
+            else:
+                # Entire story
+                meta = next(s['metadata'] for s in stories if s['id'] == selected_id)
+                chapter_ids = [ch['id'] for ch in meta.get('chapters', [])]
+                
+            if not chapter_ids:
+                message_dialog(title="Error", text="No chapters to proofread.").run()
+                continue
+                
+            console.print(f"[bold green]Starting proofreading agent for {len(chapter_ids)} chapters...[/bold green]")
+            
+            import asyncio
+            success_count = 0
+            fail_count = 0
+            
+            for ch_id in chapter_ids:
+                try:
+                    console.print(f"\n[cyan]Proofreading chapter {ch_id}...[/cyan]")
+                    asyncio.run(writer.proofread_chapter(selected_id, ch_id))
+                    success_count += 1
+                except Exception as e:
+                    console.print(f"[red]Failed to proofread {ch_id}: {e}[/red]")
+                    fail_count += 1
+            
+            message_dialog(
+                title="Proofreading Complete", 
+                text=f"Finished.\nSuccessful: {success_count}\nFailed: {fail_count}"
+            ).run()
+
+        elif choice == "art":
+            writer = NovelWriter()
+            stories = writer.list_stories()
+            values = [ (s['id'], f"{s['metadata'].get('title','Untitled')} ({len(s['metadata'].get('chapters',[]))} chapters)") for s in stories ]
+            
+            if not values:
+                message_dialog(title="No stories", text="No stories available.").run()
+                continue
+                
+            selected_id = radiolist_dialog(title="Select Story for Art Direction", values=values).run()
+            if not selected_id: continue
+            
+            # Scope
+            scope = radiolist_dialog(title="Scope", values=[('entire','Entire story'), ('single','Single chapter')]).run()
+            if not scope: continue
+            
+            chapter_ids = []
+            if scope == 'single':
+                meta = next(s['metadata'] for s in stories if s['id'] == selected_id)
+                ch_values = [(ch['id'], f"{i+1}. {ch['title']}") for i, ch in enumerate(meta.get('chapters',[]))]
+                sel = radiolist_dialog(title="Select Chapter", values=ch_values).run()
+                if sel: chapter_ids = [sel]
+            else:
+                meta = next(s['metadata'] for s in stories if s['id'] == selected_id)
+                chapter_ids = [ch['id'] for ch in meta.get('chapters', [])]
+                
+            if not chapter_ids: continue
+            
+            console.print(f"[bold magenta]Starting Art Director...[/bold magenta]")
+            try:
+                import asyncio
+                res = asyncio.run(writer.generate_image_prompts(selected_id, chapter_ids))
+                message_dialog(title="Success", text=f"Generated {len(res)} image prompts.").run()
+            except Exception as e:
+                message_dialog(title="Error", text=f"Art Director failed: {e}").run()
+
         elif choice == "translate":
             writer = NovelWriter()
             stories = writer.list_stories()
@@ -178,27 +279,26 @@ def main():
             if not selected:
                 continue
 
-            scope = radiolist_dialog(title="Translation Scope", values=[('entire','Entire story'), ('select','Select chapters')]).run()
+            scope = radiolist_dialog(title="Translation Scope", values=[('entire','Entire story'), ('single','Single chapter')]).run()
+            if not scope:
+                continue
+
             chapter_ids = None
-            if scope == 'select':
-                # Let the user pick chapters interactively rather than typing numbers
+            if scope == 'single':
                 meta = next(s['metadata'] for s in stories if s['id'] == selected)
                 chapters_list = meta.get('chapters', [])
                 if not chapters_list:
                     message_dialog(title="No chapters", text="No chapters found for this story.").run()
                     continue
 
-                chapter_ids = []
-                # build selectable values (chapter_id, display)
-                base_values = [(ch['id'], f"{i+1}. {ch['title']}") for i, ch in enumerate(chapters_list)]
-                # loop to allow multiple selections
-                while True:
-                    values = [('__done__', 'Done selecting')] + base_values
-                    pick = radiolist_dialog(title="Select a chapter (choose 'Done selecting' when finished)", values=values).run()
-                    if not pick or pick == '__done__':
-                        break
-                    if pick not in chapter_ids:
-                        chapter_ids.append(pick)
+                # Select a single chapter
+                ch_values = [(ch['id'], f"{i+1}. {ch['title']}") for i, ch in enumerate(chapters_list)]
+                selected_chapter = radiolist_dialog(title="Select Chapter to Translate", values=ch_values).run()
+                
+                if not selected_chapter:
+                    continue
+                    
+                chapter_ids = [selected_chapter]
 
             language = radiolist_dialog(title="Target Language", values=[
                 ('Hindi','Hindi'), ('French','French'), ('Spanish','Spanish'), ('Japanese','Japanese'), ('Chinese','Chinese')
